@@ -292,6 +292,7 @@ function detectPitch(buf, sampleRate) {
 
   const minLag = Math.floor(sampleRate / F_MAX);
   const maxLag = Math.floor(sampleRate / F_MIN);
+  const threshold = 0.05;
 
   let bestLag = -1;
   let bestCorr = 0;
@@ -308,14 +309,16 @@ function detectPitch(buf, sampleRate) {
     if (corr > bestCorr) {
       bestCorr = corr;
       bestLag = lag;
-      foundPeak = true;
+      if (corr >= threshold * 2) {
+        foundPeak = true;
+      }
     } else if (foundPeak && corr < prevCorr * 0.5) {
       break;
     }
     prevCorr = corr;
   }
 
-  if (bestLag < 0 || bestCorr < 0.01) return -1;
+  if (bestLag < 0 || bestCorr < threshold) return -1;
 
   const lagRefined = parabolicInterp(buf, bestLag);
   return sampleRate / lagRefined;
@@ -411,12 +414,37 @@ function draw() {
   }
 }
 
+function normalize(buffer) {
+  let n = buffer.length;
+
+  let min = buffer[0];
+  let max = buffer[0];
+  let mean = 0.0;
+  for (let i = 0; i < n; i++) {
+    let x = buffer[i];
+    min = Math.min(min, x);
+    max = Math.max(max, x);
+    mean += x / n;
+  }
+
+  let scale = 2 / (max - min);
+  for (let i = 0; i < n; i++) {
+    buffer[i] = (buffer[i] - mean) * scale;
+  }
+}
+
 function loop() {
   if (!analyser) return;
   analyser.getFloatTimeDomainData(buffer);
   const rms = rmsLevel(buffer);
   updateLevelMeter(rms);
-  const f = rms >= DETECT_THRESHOLD ? detectPitch(buffer, audioCtx.sampleRate) : -1;
+
+  let f = -1;
+  if (rms >= DETECT_THRESHOLD) {
+    normalize(buffer);
+    f = detectPitch(buffer, audioCtx.sampleRate);
+  }
+
   const now = performance.now();
 
   if (f > 0) {
