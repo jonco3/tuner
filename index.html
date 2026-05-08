@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guitar Tuner</title>
+<style>
+  :root {
+    --bg: #1a1a1d;
+    --panel: #111;
+    --fg: #eee;
+    --muted: #888;
+    --accent: #4caf50;
+    --warn: #ff9800;
+    --bad: #f44336;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    margin: 0;
+    padding: 24px;
+    min-height: 100vh;
+  }
+  main { max-width: 900px; margin: 0 auto; }
+  h1 { text-align: center; font-weight: 300; margin: 0 0 24px; }
+  .controls {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .controls button {
+    padding: 12px 28px;
+    font-size: 18px;
+    color: #777;
+    background: transparent;
+    border: 2px solid #444;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+  }
+  #start:not(:disabled) {
+    color: white;
+    background: var(--accent);
+    border-color: var(--accent);
+    box-shadow: 0 0 16px rgba(76, 175, 80, 0.55);
+  }
+  #stop:not(:disabled) {
+    color: white;
+    background: var(--bad);
+    border-color: var(--bad);
+    box-shadow: 0 0 16px rgba(244, 67, 54, 0.55);
+  }
+  .controls button:disabled { cursor: default; }
+  #note {
+    text-align: center;
+    font-size: 96px;
+    font-weight: 200;
+    line-height: 1;
+    margin: 16px 0 8px;
+    height: 96px;
+  }
+  #freq {
+    text-align: center;
+    color: var(--muted);
+    font-size: 16px;
+    height: 20px;
+    margin-bottom: 12px;
+  }
+  #status {
+    text-align: center;
+    font-size: 22px;
+    height: 32px;
+    margin-bottom: 16px;
+  }
+  .intune { color: var(--accent); }
+  .near { color: var(--warn); }
+  .off { color: var(--bad); }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 220px;
+    background: var(--panel);
+    border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Guitar Tuner</h1>
+  <div class="controls">
+    <button id="start">Start</button>
+    <button id="stop">Stop</button>
+  </div>
+  <div id="note">&mdash;</div>
+  <div id="freq"></div>
+  <div id="status">Starting...</div>
+  <canvas id="meter"></canvas>
+</main>
+<script>
+'use strict';
+
+const STRINGS = [
+  { name: '6 E', freq: 82.41 },
+  { name: '5 A', freq: 110.00 },
+  { name: '4 D', freq: 146.83 },
+  { name: '3 G', freq: 196.00 },
+  { name: '2 B', freq: 246.94 },
+  { name: '1 E', freq: 329.63 },
+];
+
+const F_MIN = 70;
+const F_MAX = 380;
+const IN_TUNE_CENTS = 5;
+const NEAR_CENTS = 15;
+
+const startBtn = document.getElementById('start');
+const stopBtn = document.getElementById('stop');
+const noteEl = document.getElementById('note');
+const freqEl = document.getElementById('freq');
+const statusEl = document.getElementById('status');
+const canvas = document.getElementById('meter');
+const ctx = canvas.getContext('2d');
+
+let audioCtx, analyser, buffer, micStream;
+let rafId = null;
+let smoothedFreq = null;
+let lastDetectionTime = 0;
+
+function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', () => { resizeCanvas(); draw(); });
+
+async function start() {
+  if (audioCtx) return;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        autoGainControl: false,
+        noiseSuppression: false,
+      },
+    });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 4096;
+    buffer = new Float32Array(analyser.fftSize);
+    source.connect(analyser);
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    statusEl.textContent = 'Play a string';
+    statusEl.className = '';
+    rafId = requestAnimationFrame(loop);
+  } catch (e) {
+    statusEl.textContent = 'Microphone access denied';
+    statusEl.className = 'off';
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  }
+}
+
+function stop() {
+  if (rafId !== null) {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+  if (micStream) {
+    for (const track of micStream.getTracks()) track.stop();
+    micStream = null;
+  }
+  if (audioCtx) {
+    audioCtx.close();
+    audioCtx = null;
+  }
+  analyser = null;
+  buffer = null;
+  smoothedFreq = null;
+  noteEl.innerHTML = '&mdash;';
+  freqEl.textContent = '';
+  statusEl.textContent = 'Stopped';
+  statusEl.className = '';
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  draw();
+}
+
+startBtn.addEventListener('click', start);
+stopBtn.addEventListener('click', stop);
+
+function detectPitch(buf, sampleRate) {
+  const N = buf.length;
+  let rms = 0;
+  for (let i = 0; i < N; i++) rms += buf[i] * buf[i];
+  rms = Math.sqrt(rms / N);
+  if (rms < 0.01) return -1;
+
+  const minLag = Math.floor(sampleRate / F_MAX);
+  const maxLag = Math.floor(sampleRate / F_MIN);
+
+  let bestLag = -1;
+  let bestCorr = 0;
+  let prevCorr = 0;
+  let foundPeak = false;
+
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let corr = 0;
+    for (let i = 0; i < N - lag; i++) {
+      corr += buf[i] * buf[i + lag];
+    }
+    corr /= (N - lag);
+
+    if (corr > bestCorr) {
+      bestCorr = corr;
+      bestLag = lag;
+      foundPeak = true;
+    } else if (foundPeak && corr < prevCorr * 0.5) {
+      break;
+    }
+    prevCorr = corr;
+  }
+
+  if (bestLag < 0 || bestCorr < 0.01) return -1;
+
+  const lagRefined = parabolicInterp(buf, bestLag);
+  return sampleRate / lagRefined;
+}
+
+function parabolicInterp(buf, lag) {
+  const N = buf.length;
+  function corrAt(k) {
+    let c = 0;
+    for (let i = 0; i < N - k; i++) c += buf[i] * buf[i + k];
+    return c / (N - k);
+  }
+  const y1 = corrAt(lag - 1);
+  const y2 = corrAt(lag);
+  const y3 = corrAt(lag + 1);
+  const denom = (y1 - 2 * y2 + y3);
+  if (denom === 0) return lag;
+  return lag + 0.5 * (y1 - y3) / denom;
+}
+
+function nearestString(freq) {
+  let best = STRINGS[0];
+  let bestAbs = Infinity;
+  for (const s of STRINGS) {
+    const c = Math.abs(1200 * Math.log2(freq / s.freq));
+    if (c < bestAbs) { best = s; bestAbs = c; }
+  }
+  return { string: best, cents: 1200 * Math.log2(freq / best.freq) };
+}
+
+function freqToX(f) {
+  const w = canvas.clientWidth;
+  const t = (Math.log(f) - Math.log(F_MIN)) / (Math.log(F_MAX) - Math.log(F_MIN));
+  return Math.max(0, Math.min(w, t * w));
+}
+
+function draw() {
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1;
+  const semis = Math.round(12 * Math.log2(F_MAX / F_MIN));
+  for (let i = 0; i <= semis; i++) {
+    const f = F_MIN * Math.pow(2, i / 12);
+    const x = freqToX(f);
+    ctx.beginPath();
+    ctx.moveTo(x, 32);
+    ctx.lineTo(x, h - 32);
+    ctx.stroke();
+  }
+
+  for (const s of STRINGS) {
+    const x = freqToX(s.freq);
+    ctx.strokeStyle = '#666';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, 28);
+    ctx.lineTo(x, h - 28);
+    ctx.stroke();
+
+    ctx.fillStyle = '#bbb';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(s.name, x, 20);
+
+    ctx.fillStyle = '#777';
+    ctx.font = '12px sans-serif';
+    ctx.fillText(s.freq.toFixed(1) + ' Hz', x, h - 10);
+  }
+
+  if (smoothedFreq && smoothedFreq >= F_MIN && smoothedFreq <= F_MAX) {
+    const { cents } = nearestString(smoothedFreq);
+    const absCents = Math.abs(cents);
+    let color = '#f44336';
+    if (absCents < IN_TUNE_CENTS) color = '#4caf50';
+    else if (absCents < NEAR_CENTS) color = '#ff9800';
+
+    const x = freqToX(smoothedFreq);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x, 28);
+    ctx.lineTo(x, h - 28);
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x, h / 2, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function loop() {
+  if (!analyser) return;
+  analyser.getFloatTimeDomainData(buffer);
+  const f = detectPitch(buffer, audioCtx.sampleRate);
+  const now = performance.now();
+
+  if (f > 0) {
+    lastDetectionTime = now;
+    smoothedFreq = smoothedFreq ? smoothedFreq * 0.7 + f * 0.3 : f;
+
+    const { string, cents } = nearestString(smoothedFreq);
+    noteEl.textContent = string.name;
+    freqEl.textContent = smoothedFreq.toFixed(1) + ' Hz  (target ' + string.freq.toFixed(2) + ' Hz)';
+
+    const absCents = Math.abs(cents);
+    if (absCents < IN_TUNE_CENTS) {
+      statusEl.textContent = 'In tune';
+      statusEl.className = 'intune';
+    } else if (cents < 0) {
+      statusEl.textContent = 'Too low  ' + cents.toFixed(0) + '¢';
+      statusEl.className = absCents < NEAR_CENTS ? 'near' : 'off';
+    } else {
+      statusEl.textContent = 'Too high  +' + cents.toFixed(0) + '¢';
+      statusEl.className = absCents < NEAR_CENTS ? 'near' : 'off';
+    }
+  } else if (now - lastDetectionTime > 800) {
+    smoothedFreq = null;
+    noteEl.innerHTML = '&mdash;';
+    freqEl.textContent = '';
+    statusEl.textContent = 'Listening';
+    statusEl.className = '';
+  }
+
+  draw();
+  rafId = requestAnimationFrame(loop);
+}
+
+resizeCanvas();
+draw();
+stopBtn.disabled = true;
+start();
+</script>
+</body>
+</html>
