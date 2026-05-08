@@ -85,6 +85,48 @@
     background: var(--panel);
     border-radius: 6px;
   }
+  #level {
+    position: relative;
+    height: 14px;
+    margin: 12px 0 6px;
+  }
+  #levelTrack {
+    height: 100%;
+    background: #2a2a2a;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  #levelFill {
+    height: 100%;
+    width: 0%;
+    background: #bbb;
+    transition: width 0.05s linear;
+  }
+  #levelThreshold {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    width: 2px;
+    background: var(--fg);
+    pointer-events: none;
+  }
+  #levelThreshold::after {
+    content: 'threshold';
+    position: absolute;
+    top: -16px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  #levelLabel {
+    display: flex;
+    justify-content: space-between;
+    color: var(--muted);
+    font-size: 12px;
+    margin-bottom: 16px;
+  }
 </style>
 </head>
 <body>
@@ -96,8 +138,16 @@
   </div>
   <div id="note">&mdash;</div>
   <div id="freq"></div>
-  <div id="status">Starting...</div>
+  <div id="status"></div>
   <canvas id="meter"></canvas>
+  <div id="level">
+    <div id="levelTrack"><div id="levelFill"></div></div>
+    <div id="levelThreshold"></div>
+  </div>
+  <div id="levelLabel">
+    <span id="levelText">Input: -&infin; dB</span>
+    <span id="thresholdText">Threshold: -40 dB</span>
+  </div>
 </main>
 <script>
 'use strict';
@@ -116,6 +166,14 @@ const F_MAX = 380;
 const IN_TUNE_CENTS = 5;
 const NEAR_CENTS = 15;
 
+// Pitch detection runs only when the input RMS is at or above this level.
+// Expressed as linear amplitude (0-1); 0.01 ≈ -40 dBFS.
+const DETECT_THRESHOLD = 0.01;
+
+// Visual level-meter range, in dBFS.
+const LEVEL_MIN_DB = -60;
+const LEVEL_MAX_DB = 0;
+
 const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
 const noteEl = document.getElementById('note');
@@ -123,6 +181,10 @@ const freqEl = document.getElementById('freq');
 const statusEl = document.getElementById('status');
 const canvas = document.getElementById('meter');
 const ctx = canvas.getContext('2d');
+const levelFillEl = document.getElementById('levelFill');
+const levelThresholdEl = document.getElementById('levelThreshold');
+const levelTextEl = document.getElementById('levelText');
+const thresholdTextEl = document.getElementById('thresholdText');
 
 let audioCtx, analyser, buffer, micStream;
 let rafId = null;
@@ -157,7 +219,7 @@ async function start() {
     source.connect(analyser);
     startBtn.disabled = true;
     stopBtn.disabled = false;
-    statusEl.textContent = 'Play a string';
+    statusEl.textContent = '';
     statusEl.className = '';
     rafId = requestAnimationFrame(loop);
   } catch (e) {
@@ -186,8 +248,9 @@ function stop() {
   smoothedFreq = null;
   noteEl.innerHTML = '&mdash;';
   freqEl.textContent = '';
-  statusEl.textContent = 'Stopped';
+  statusEl.textContent = '';
   statusEl.className = '';
+  updateLevelMeter(0);
   startBtn.disabled = false;
   stopBtn.disabled = true;
   draw();
@@ -196,12 +259,36 @@ function stop() {
 startBtn.addEventListener('click', start);
 stopBtn.addEventListener('click', stop);
 
+function rmsLevel(buf) {
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+  return Math.sqrt(sum / buf.length);
+}
+
+function rmsToDb(rms) {
+  return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+}
+
+function dbToPercent(db) {
+  if (!isFinite(db)) return 0;
+  const t = (db - LEVEL_MIN_DB) / (LEVEL_MAX_DB - LEVEL_MIN_DB);
+  return Math.max(0, Math.min(1, t)) * 100;
+}
+
+function initLevelMeter() {
+  const thresholdDb = rmsToDb(DETECT_THRESHOLD);
+  levelThresholdEl.style.left = dbToPercent(thresholdDb) + '%';
+  thresholdTextEl.textContent = 'Threshold: ' + thresholdDb.toFixed(0) + ' dB';
+}
+
+function updateLevelMeter(rms) {
+  const db = rmsToDb(rms);
+  levelFillEl.style.width = dbToPercent(db) + '%';
+  levelTextEl.textContent = 'Input: ' + (isFinite(db) ? db.toFixed(0) + ' dB' : '-∞ dB');
+}
+
 function detectPitch(buf, sampleRate) {
   const N = buf.length;
-  let rms = 0;
-  for (let i = 0; i < N; i++) rms += buf[i] * buf[i];
-  rms = Math.sqrt(rms / N);
-  if (rms < 0.01) return -1;
 
   const minLag = Math.floor(sampleRate / F_MAX);
   const maxLag = Math.floor(sampleRate / F_MIN);
@@ -327,7 +414,9 @@ function draw() {
 function loop() {
   if (!analyser) return;
   analyser.getFloatTimeDomainData(buffer);
-  const f = detectPitch(buffer, audioCtx.sampleRate);
+  const rms = rmsLevel(buffer);
+  updateLevelMeter(rms);
+  const f = rms >= DETECT_THRESHOLD ? detectPitch(buffer, audioCtx.sampleRate) : -1;
   const now = performance.now();
 
   if (f > 0) {
@@ -353,7 +442,7 @@ function loop() {
     smoothedFreq = null;
     noteEl.innerHTML = '&mdash;';
     freqEl.textContent = '';
-    statusEl.textContent = 'Listening';
+    statusEl.textContent = '';
     statusEl.className = '';
   }
 
@@ -363,6 +452,7 @@ function loop() {
 
 resizeCanvas();
 draw();
+initLevelMeter();
 stopBtn.disabled = true;
 start();
 </script>
