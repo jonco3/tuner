@@ -287,55 +287,59 @@ function updateLevelMeter(rms) {
   levelTextEl.textContent = 'Input: ' + (isFinite(db) ? db.toFixed(0) + ' dB' : '-∞ dB');
 }
 
-function detectPitch(buf, sampleRate) {
-  const N = buf.length;
+function correlate(buf, sampleRate, minLag, maxLag) {
+  const n = buf.length;
 
+  let result = new Array(maxLag).fill(0);
+
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let corr = 0;
+    for (let i = 0; i < n - lag; i++) {
+      corr += buf[i] * buf[i + lag];
+    }
+    result[lag] = corr / (n - lag);
+  }
+
+  return result;
+}
+
+function findBestCorrelation(corrs, minLag, maxLag) {
+  let bestLag = 0;
+  let bestCorr = 0;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let corr = corrs[lag];
+    if (corr > bestCorr) {
+      bestCorr = corr;
+      bestLag = lag;
+    }
+  }
+
+  return bestLag;
+}
+
+function detectPitch(buf, sampleRate) {
   const minLag = Math.floor(sampleRate / F_MAX);
   const maxLag = Math.floor(sampleRate / F_MIN);
   const threshold = 0.05;
 
-  let bestLag = -1;
-  let bestCorr = 0;
-  let prevCorr = 0;
-  let foundPeak = false;
-
-  for (let lag = minLag; lag <= maxLag; lag++) {
-    let corr = 0;
-    for (let i = 0; i < N - lag; i++) {
-      corr += buf[i] * buf[i + lag];
-    }
-    corr /= (N - lag);
-
-    if (corr > bestCorr) {
-      bestCorr = corr;
-      bestLag = lag;
-      if (corr >= threshold * 2) {
-        foundPeak = true;
-      }
-    } else if (foundPeak && corr < prevCorr * 0.5) {
-      break;
-    }
-    prevCorr = corr;
+  let corrs = correlate(buf, sampleRate, minLag - 1, maxLag + 1);
+  let lag = findBestCorrelation(corrs, minLag, maxLag);
+  if (lag === 0 || corrs[lag] < 0.1) {
+    return -1;
   }
 
-  if (bestLag < 0 || bestCorr < threshold) return -1;
-
-  const lagRefined = parabolicInterp(buf, bestLag);
-  return sampleRate / lagRefined;
+  lag = parabolicInterp(buf, lag, corrs);
+  return sampleRate / lag;
 }
 
-function parabolicInterp(buf, lag) {
-  const N = buf.length;
-  function corrAt(k) {
-    let c = 0;
-    for (let i = 0; i < N - k; i++) c += buf[i] * buf[i + k];
-    return c / (N - k);
+function parabolicInterp(buf, lag, corrs) {
+  const y1 = corrs[lag - 1];
+  const y2 = corrs[lag];
+  const y3 = corrs[lag + 1];
+  const denom = y1 - 2 * y2 + y3;
+  if (denom === 0) {
+    return lag;
   }
-  const y1 = corrAt(lag - 1);
-  const y2 = corrAt(lag);
-  const y3 = corrAt(lag + 1);
-  const denom = (y1 - 2 * y2 + y3);
-  if (denom === 0) return lag;
   return lag + 0.5 * (y1 - y3) / denom;
 }
 
