@@ -14,9 +14,8 @@ const F_MAX = 380;
 const IN_TUNE_CENTS = 5;
 const NEAR_CENTS = 15;
 
-// Pitch detection runs only when the input RMS is at or above this level.
-// Expressed as linear amplitude (0-1); 0.01 ≈ -40 dBFS.
-const DETECT_THRESHOLD = 0.002;
+// Pitch detection runs only when the input level is at or above this threshold, in dBFS.
+const DETECT_THRESHOLD = -54;
 
 // Visual level-meter range, in dBFS.
 const LEVEL_MIN_DB = -60;
@@ -124,9 +123,8 @@ function dbToPercent(db) {
 }
 
 function initLevelMeter() {
-  const thresholdDb = rmsToDb(DETECT_THRESHOLD);
-  levelThresholdEl.style.left = dbToPercent(thresholdDb) + '%';
-  thresholdTextEl.textContent = 'Threshold: ' + thresholdDb.toFixed(0) + ' dB';
+  levelThresholdEl.style.left = dbToPercent(DETECT_THRESHOLD) + '%';
+  thresholdTextEl.textContent = 'Threshold: ' + DETECT_THRESHOLD.toFixed(0) + ' dB';
 }
 
 function updateLevelMeter(rms) {
@@ -292,7 +290,7 @@ function loop() {
   updateLevelMeter(rms);
 
   let f = -1;
-  if (rms >= DETECT_THRESHOLD) {
+  if (rmsToDb(rms) >= DETECT_THRESHOLD) {
     normalize(buffer);
     f = detectPitch(buffer, audioCtx.sampleRate);
   }
